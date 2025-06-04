@@ -18,13 +18,13 @@ disp('Generazione delle traiettorie desiderate...');
 Mm = 0.5;    % Inerzia del motore [kg*m^2]
 K = 2000;    % Rigidezza del giunto elastico [Nm/rad]
 M = 2.0;     % Inerzia del link [kg*m^2]
-Pg = 10;     % Parametro di gravità [Nm]
+Pg = 5;     % Parametro di gravità [Nm]
 
 % Parametri del controllore (necessari nel modello Simulink)
-Kp_tau = 100;
-Kd_tau = 5;
-Kp_theta = 50;
-Kd_theta = 2;
+Kp_tau = 10;
+Kd_tau = 0.1;
+Kp_theta = 1;
+Kd_theta = 0.1;
 
 % Tempo di simulazione
 T_sim = 10;  % Durata della simulazione in secondi
@@ -60,6 +60,8 @@ ddtheta_d = ddqd - (Pg/K) * (cos(qd) .* dqd.^2 + sin(qd) .* ddqd);
 % Organizza i dati per i blocchi From Workspace in Simulink come oggetti timeseries
 % Questo permette ai blocchi From Workspace di interpretare correttamente tempo e dati.
 
+%% Nuova sezione in run_robot_simulation.m per il formato Matrix [tempo, dati]
+
 % Assicurati che i dati siano vettori colonna
 time_col = time';
 qd_col = qd';
@@ -70,21 +72,24 @@ theta_d_col = theta_d';
 dtheta_d_col = dtheta_d';
 ddtheta_d_col = ddtheta_d';
 
-% Crea oggetti timeseries per ciascun segnale desiderato
-sim_data.qd = timeseries(qd_col, time_col);
-sim_data.dqd = timeseries(dqd_col, time_col);
-sim_data.ddqd = timeseries(ddqd_col, time_col);
-sim_data.tau_Jd = timeseries(tau_Jd_col, time_col);
-sim_data.theta_d = timeseries(theta_d_col, time_col);
-sim_data.dtheta_d = timeseries(dtheta_d_col, time_col);
-sim_data.ddtheta_d = timeseries(ddtheta_d_col, time_col);
+% Crea le variabili nella struttura sim_data come MATRICI [tempo, dati]
+% Questo è il formato che il blocco 'From Workspace' sta richiedendo esplicitamente.
+sim_data.qd = [time_col, qd_col];
+sim_data.dqd = [time_col, dqd_col];
+sim_data.ddqd = [time_col, ddqd_col];
+sim_data.tau_Jd = [time_col, tau_Jd_col];
+sim_data.theta_d = [time_col, theta_d_col];
+sim_data.dtheta_d = [time_col, dtheta_d_col];
+sim_data.ddtheta_d = [time_col, ddtheta_d_col];
 
-% Non abbiamo bisogno di sim_data.time separato, perché è già incorporato in ogni timeseries object
-% Tuttavia, se altri blocchi necessitano di sim_data.time come array, puoi lasciarlo:
-sim_data.time = time_col; % Lascia questo se altri blocchi o il codice post-simulazione lo usano come array
-
+% IMPORTANTE: Per il blocco From Workspace che caricherà sim_data.time_ref
+% Questo specifico blocco non deve aspettarsi un formato [tempo, dati].
+% Useremo questo per il blocco di 'time_ref' che hai nel sottosistema 'Input Desiderati'.
+% Per il blocco From Workspace che richiede un formato [tempo, dati] anche per il tempo stesso
+% Creiamo una matrice con il tempo nella prima colonna e un duplicato del tempo (o zeri) nella seconda.
+sim_data.time_for_input_ref = [time_col, time_col]; % Ora è una matrice 10001x2
 disp('Traiettorie generate e variabili caricate nel workspace.');
-
+sim_data.time = time_col;
 
 %% 2. Configurazione e Avvio della Simulazione Simulink
 % Assicurati che il nome del tuo file .slx sia corretto
@@ -105,48 +110,43 @@ disp('Simulazione completata.');
 %% 3. Post-Elaborazione dei Dati (Esempio)
 % Recupera i dati dai blocchi To Workspace se li hai configurati
 % Ad esempio, se hai salvato theta_meas e tau_J_meas nel workspace da Simulink
+time_sim = sim_data.time; % Questo garantisce che time_sim sia sempre definito per il plot e le inizializzazioni
 
-% Supponendo che tu abbia configurato i blocchi To Workspace per salvare:
-% theta_sim_output (per la posizione del motore misurata)
-% tau_J_sim_output (per la coppia al giunto misurata)
-% time_sim_output (per il tempo della simulazione)
-% Se hai usato logging automatico dei segnali (es. dalla root outports), puoi accedervi via simout.
+theta_meas = NaN(size(time_sim)); 
+tau_J_meas = NaN(size(time_sim));
 
-% Esempio di recupero dati da 'To Workspace'
-if exist('theta_sim_output', 'var') && exist('tau_J_sim_output', 'var')
+% Controlla se i dati di output di Simulink sono stati salvati correttamente
+if exist('theta_sim_output', 'var') && exist('tau_J_sim_output', 'var') && exist('time_sim_output', 'var')
     theta_meas = theta_sim_output;
     tau_J_meas = tau_J_sim_output;
-    % Se non hai un blocco To Workspace per il tempo, usa sim_data.time
-    time_sim = sim_data.time; % Usa il tempo generato, che sarà lo stesso della simulazione
+    time_sim = time_sim_output; % Se tutti esistono, usa il tempo salvato dal To Workspace
 else
-    disp('Dati di output della simulazione non trovati direttamente nel workspace.');
-    disp('Verifica le impostazioni dei blocchi "To Workspace" nel tuo modello Simulink.');
-    % Alternativa: accedere ai dati registrati da Simulink se hai abilitato Data Logging
-    % ad esempio: theta_meas = simout.logsout.get('theta_meas').Values.Data;
-    % Richiede che tu abbia nominato i segnali e abilitato la registrazione.
+    disp('Dati di output della simulazione (theta_sim_output, tau_J_sim_output, time_sim_output) non trovati direttamente nel workspace.');
+    disp('Verifica attentamente le impostazioni dei blocchi "To Workspace" nel tuo modello Simulink (nome variabile, save format: Array).');
+    warning('I plot useranno il tempo e dati "NaN" per i segnali non trovati. La simulazione potrebbe non aver salvato i dati.');
 end
-
 
 %% 4. Plot dei Risultati Simulati (per verifica)
 figure;
 subplot(2,1,1);
-plot(time_sim, theta_meas);
+plot(time_sim, theta_meas, 'DisplayName', 'Misurata (Sim.)'); % theta_meas è un array normale
 hold on;
-plot(time_sim, sim_data.theta_d, '--');
+% Modifica qui per accedere a tempo e dati dalla matrice sim_data.theta_d
+plot(sim_data.theta_d(:,1), sim_data.theta_d(:,2), '--', 'DisplayName', 'Desiderata');
 title('Posizione Motore: Misurata (Simulata) vs Desiderata');
 xlabel('Tempo (s)');
 ylabel('Posizione (rad)');
-legend('Misurata (Sim.)', 'Desiderata');
+legend show; % Mostra la legenda
 grid on;
 
 subplot(2,1,2);
-plot(time_sim, tau_J_meas);
+plot(time_sim, tau_J_meas, 'DisplayName', 'Misurata (Sim.)');
 hold on;
-plot(time_sim, sim_data.tau_Jd, '--');
+% Modifica qui per accedere a tempo e dati dalla matrice sim_data.tau_Jd
+plot(sim_data.tau_Jd(:,1), sim_data.tau_Jd(:,2), '--', 'DisplayName', 'Desiderata');
 title('Coppia al Giunto: Misurata (Simulata) vs Desiderata');
 xlabel('Tempo (s)');
 ylabel('Coppia (Nm)');
-legend('Misurata (Sim.)', 'Desiderata');
+legend show;
 grid on;
-
 disp('--- Processo di simulazione robotica completato ---');
