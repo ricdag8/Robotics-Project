@@ -140,13 +140,31 @@ time_sim   = simout.yout{3}.Values.Data;
 
 disp('Dati recuperati con successo da simout.');
 
+%% 4. Plot dei Risultati Simulati (per verifica)
+figure;
+subplot(2,1,1);
+plot(time_sim, theta_meas, 'DisplayName', 'Misurata (Sim.)'); % theta_meas è un array normale
+hold on;
+% Modifica qui per accedere a tempo e dati dalla matrice sim_data.theta_d
+plot(sim_data.theta_d(:,1), sim_data.theta_d(:,2), '--', 'DisplayName', 'Desiderata');
+title('Posizione Motore: Misurata (Simulata) vs Desiderata');
+xlabel('Tempo (s)');
+ylabel('Posizione (rad)');
+legend show; % Mostra la legenda
+grid on;
 
+subplot(2,1,2);
+plot(time_sim, tau_J_meas, 'DisplayName', 'Misurata (Sim.)');
+hold on;
+% Modifica qui per accedere a tempo e dati dalla matrice sim_data.tau_Jd
+plot(sim_data.tau_Jd(:,1), sim_data.tau_Jd(:,2), '--', 'DisplayName', 'Desiderata');
+title('Coppia al Giunto: Misurata (Simulata) vs Desiderata');
+xlabel('Tempo (s)');
+ylabel('Coppia (Nm)');
+legend show;
+grid on;
+disp('--- Processo di simulazione robotica completato ---');
 
-% Estrazione dei dati specifici per il plotting dal nuovo ordine di 'simout'.
-% L'ordine {n} corrisponde al numero di porta impostato in Simulink.
-theta_meas_plot = simout.yout{1}.Values.Data;
-tau_J_meas_plot = simout.yout{5}.Values.Data;
-time_sim_plot   = simout.yout{7}.Values.Data;
 
 figure;
 subplot(2,1,1);
@@ -173,10 +191,12 @@ disp('Grafici di verifica generati correttamente.');
 
 
 
-%% 4. IDENTIFICAZIONE DEI PARAMETRI DEL MODELLO
+%% 5. IDENTIFICAZIONE DEI PARAMETRI DEL MODELLO
+
 disp('--- Inizio processo di identificazione dei parametri ---');
 
-% Estrazione completa dei dati da 'simout'
+% Estrazione dei dati dalla variabile 'simout' creata dalla simulazione.
+% L'ordine {n} corrisponde al numero di porta che hai impostato in Simulink.
 theta_meas = simout.yout{1}.Values.Data;
 dtheta_meas= simout.yout{2}.Values.Data;
 q_pos      = simout.yout{3}.Values.Data;
@@ -185,46 +205,62 @@ tau_J_meas = simout.yout{5}.Values.Data;
 tau_in     = simout.yout{6}.Values.Data; 
 time_sim   = simout.yout{7}.Values.Data;
 
-% --- A. Stima della Rigidezza K (non richiede accelerazione) ---
+disp('Dati estratti correttamente da simout.');
+
+% Calcolo delle accelerazioni, che non possiamo misurare direttamente.
+% Le otteniamo derivando numericamente i segnali di velocità.
+dt = time_sim(2) - time_sim(1); % Calcolo del passo di campionamento
+ddtheta_meas = diff(dtheta_meas) / dt;
+ddq_meas     = diff(dq_pos) / dt;
+
+% La funzione 'diff' calcola la differenza tra elementi adiacenti,
+% quindi il vettore risultante è più corto di 1 elemento.
+% Dobbiamo accorciare TUTTI gli altri vettori di 1 per renderli
+% della stessa lunghezza e poter fare i calcoli.
+theta_meas = theta_meas(1:end-1);
+dtheta_meas= dtheta_meas(1:end-1);
+q_pos      = q_pos(1:end-1);
+dq_pos     = dq_pos(1:end-1);
+tau_J_meas = tau_J_meas(1:end-1);
+tau_in     = tau_in(1:end-1);
+time_sim   = time_sim(1:end-1); % <-- Correzione importante!
+
+disp('Accelerazioni calcolate e vettori allineati.');
+% Stima di K
 disp('Stima della rigidezza K...');
-K_stimato = (theta_meas - q_pos) \ tau_J_meas; 
+Y_k = tau_J_meas;
+X_k = theta_meas - q_pos;
+K_stimato = X_k \ Y_k; % Risolve il sistema ai minimi quadrati
+
 disp(['Valore "Reale" di K   : ', num2str(K)]);
 disp(['--> Valore Stimato di K: ', num2str(K_stimato)]);
-disp(' ');
+disp(' '); % Aggiunge una riga vuota per leggibilità
 
-% --- B. Filtraggio dei segnali per la stima dei parametri inerziali ---
-disp('Filtraggio dei segnali di velocità per ridurre il rumore...');
-Fc = 15; % Frequenza di taglio in Hz
-lpFilt = designfilt('lowpassfir', 'FilterOrder', 50, 'CutoffFrequency', Fc, 'SampleRate', Fs);
 
-% *** MODIFICA CHIAVE: Uso di filtfilt per un filtraggio a fase zero ***
-dtheta_filt = filtfilt(lpFilt, dtheta_meas);
-dq_filt     = filtfilt(lpFilt, dq_pos);
 
-ddtheta_filt = diff(dtheta_filt) / dt;
-ddq_filt     = diff(dq_filt) / dt;
 
-% Allineamento dei vettori alla nuova lunghezza dopo 'diff'
-N = length(ddtheta_filt);
-tau_J_meas_filt = tau_J_meas(1:N);
-tau_in_filt     = tau_in(1:N);
-q_pos_filt      = q_pos(1:N);
+% Stima di Mm
+disp('Stima dell''inerzia motore Mm...');
+Y_mm = tau_in - tau_J_meas;
+X_mm = ddtheta_meas;
+Mm_stimato = X_mm \ Y_mm;
 
-% --- C. Stima dei parametri inerziali usando i dati filtrati ---
-disp('Stima dell''inerzia motore Mm con dati filtrati...');
-Mm_stimato = ddtheta_filt \ (tau_in_filt - tau_J_meas_filt);
 disp(['Valore "Reale" di Mm   : ', num2str(Mm)]);
 disp(['--> Valore Stimato di Mm: ', num2str(Mm_stimato)]);
 disp(' ');
 
-disp('Stima di M e Pg con dati filtrati...');
-X_m_pg = [ddq_filt, cos(q_pos_filt)]; 
-parametri_stimati = X_m_pg \ tau_J_meas_filt;
-M_stimato = parametri_stimati(1);
-Pg_stimato = parametri_stimati(2);
+
+% Stima di M e Pg
+disp('Stima dell''inerzia carico M e del parametro di gravità Pg...');
+Y_m_pg = tau_J_meas;
+X_m_pg = [ddq_meas, cos(q_pos)]; % Creiamo la matrice dei regressori
+parametri_stimati = X_m_pg \ Y_m_pg;
+
+M_stimato = parametri_stimati(1);  % Il primo risultato è M
+Pg_stimato = parametri_stimati(2); % Il secondo risultato è Pg
+
 disp(['Valore "Reale" di M    : ', num2str(M)]);
 disp(['--> Valore Stimato di M : ', num2str(M_stimato)]);
 disp(['Valore "Reale" di Pg   : ', num2str(Pg)]);
 disp(['--> Valore Stimato di Pg: ', num2str(Pg_stimato)]);
-
-disp('--- Processo di simulazione e identificazione completato ---');
+disp(' ');
