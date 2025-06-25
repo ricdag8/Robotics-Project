@@ -23,8 +23,8 @@ Pg = 5;     % Parametro di gravità [Nm]
 % Parametri del controllore (necessari nel modello Simulink)
 Kp_tau = 10;
 Kd_tau = 0.1;
-Kp_theta = 0.1;
-Kd_theta = 1;
+Kp_theta = 2;
+Kd_theta = 0.5;
 
 % Tempo di simulazione
 T_sim = 10;  % Durata della simulazione in secondi
@@ -38,7 +38,7 @@ A2 = 0.3; f2 = 1.0; w2 = 2*pi*f2;
 A3 = 0.2; f3 = 1.5; w3 = 2*pi*f3;
 offset = 0.0; % Posizione di riposo, es. 0 rad
 
-qd = A1*sin(w1*time) + A2*sin(w2*time) + A3*sin(w3*time) + offset;
+qd = A1*(1-cos(w1*time)) + A2*(1-cos(w2*time)) + A3*(1-cos(w3*time))+ offset;
 
 % Calcolo delle Derivate di q_d(t) analiticamente
 dqd = A1*w1*cos(w1*time) + A2*w2*cos(w2*time) + A3*w3*cos(w3*time);
