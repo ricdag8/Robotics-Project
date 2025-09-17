@@ -1,0 +1,162 @@
+% =========================================================================
+% FASE 1: INIZIALIZZAZIONE E PARAMETRI
+% =========================================================================
+clear; clc; close all;
+
+disp('Fase 1: Inizializzazione...');
+
+% --- Parametri Fisici "Veri" del Sistema ---
+% Questi sono i valori che il nostro modello Simulink userà.
+% L'obiettivo dell'identificazione è stimare questi valori partendo dai dati.
+Mm = 0.75;  % Inerzia del motore [kg*m^2]
+M  = 1.5;   % Inerzia del link [kg*m^2]
+K  = 1200;  % Rigidezza del giunto [Nm/rad]
+
+% --- Parametri di Simulazione ---
+Ts = 0.001;      % Tempo di campionamento [s] (deve essere piccolo)
+Tf = 30;         % Durata della simulazione [s]
+
+disp('Parametri reali definiti.');
+% =========================================================================
+% FASE 2: CREAZIONE DEL SEGNALE DI INGRESSO (CHIRP)
+% =========================================================================
+disp('Fase 2: Creazione del segnale di ingresso...');
+
+% --- Vettore Tempo ---
+t = (0:Ts:Tf)';                 % Vettore colonna del tempo [s]
+N = numel(t);
+
+% --- Parametri Chirp ---
+f0 = 0.1;                       % Frequenza di partenza [Hz]
+f1 = 20;                        % Frequenza di arrivo [Hz]
+% Nota: con i parametri Mm, M, K dati, la risonanza ~ 7–8 Hz.
+% Il range 0.1–20 Hz copre bene la banda utile.
+
+% --- Ampiezza dalla torsione desiderata ---
+twist_max = 0.03;               % Torsione massima desiderata [rad] (es. 1.7°)
+tau_amp   = K * twist_max;      % Coppia di picco corrispondente [Nm]
+
+% --- Chirp base (sinusoidale a frequenza variabile) ---
+tau_input = tau_amp * chirp(t, f0, Tf, f1, 'linear', 0);
+
+% --- Tapering per evitare colpi di inizio/fine ---
+alpha = 0.2;                    % 20% di rampa (fade-in/out)
+w = tukeywin(N, alpha);         % Richiede Signal Processing Toolbox
+tau_input = tau_input .* w;
+
+% --- (Opzionale) Offset nullo e limitazione di sicurezza ---
+tau_input = tau_input - mean(tau_input);         % rimuove eventuale bias numerico
+tau_max_safe = 1.1 * tau_amp;                    % safety cap al 110% dell'ampiezza target
+tau_input = max(min(tau_input, tau_max_safe), -tau_max_safe);
+
+% --- Prepara il segnale per Simulink ---
+% a) Formato matrice [tempo, segnale] per blocco From Workspace
+input_signal = [t, tau_input];
+
+% b) In alternativa, come timeseries:
+tau_ts = timeseries(tau_input, t);
+
+% --- Visualizza l'input (controllo di sanità) ---
+figure('Name', 'Segnale di Ingresso');
+plot(t, tau_input, 'LineWidth', 1.2);
+title('Segnale di Coppia di Ingresso \tau(t) - Chirp con Tapering');
+xlabel('Tempo [s]');
+ylabel('Coppia \tau [Nm]');
+grid on;
+
+% --- Debug rapido: stampa valori chiave ---
+fprintf('Chirp: f0 = %.2f Hz, f1 = %.2f Hz, twist_{max} = %.4f rad (%.2f°)\n', ...
+        f0, f1, twist_max, twist_max*180/pi);
+fprintf('Ampiezza di coppia impostata: tau_{amp} = %.2f Nm\n', tau_amp);
+
+disp('Segnale di ingresso creato.');
+% =========================================================================
+% FASE 3: ESECUZIONE DELLA SIMULAZIONE (To Workspace -> Timeseries)
+% =========================================================================
+disp('Fase 3: Esecuzione della simulazione Simulink...');
+
+mdl = 'modello_giunto';  % <-- cambia se il nome è diverso
+open_system(mdl);
+
+% --- Diagnostica: verifica che i blocchi To Workspace esistano e come sono configurati
+tw_blocks = find_system(mdl, 'BlockType','ToWorkspace');
+if isempty(tw_blocks)
+    warning('Nessun blocco "To Workspace" trovato nel modello.');
+else
+    fprintf('Trovati %d blocchi "To Workspace":\n', numel(tw_blocks));
+    for k = 1:numel(tw_blocks)
+        vn = get_param(tw_blocks{k}, 'VariableName');
+        sf = get_param(tw_blocks{k}, 'SaveFormat');
+        fprintf('  - %s | VariableName="%s" | SaveFormat="%s"\n', tw_blocks{k}, vn, sf);
+    end
+end
+
+% --- Esegui la simulazione
+sim(mdl, 'StopTime', num2str(Tf));
+
+% --- Prova a leggere dal base workspace (To Workspace)
+theta_ok = evalin('base','exist(''theta'',''var'')==1');
+tau_ok   = evalin('base','exist(''tau_j'',''var'')==1');
+
+if theta_ok && tau_ok
+    theta_ws = evalin('base','theta');
+    tau_ws   = evalin('base','tau_j');
+
+    if isa(theta_ws,'timeseries')
+        t_theta    = theta_ws.Time;
+        theta_data = theta_ws.Data;
+    elseif isnumeric(theta_ws) && size(theta_ws,2)>=2
+        t_theta    = theta_ws(:,1);
+        theta_data = theta_ws(:,2);
+    else
+        error('La variabile "theta" esiste ma non è Timeseries né [t y].');
+    end
+
+    if isa(tau_ws,'timeseries')
+        t_tau_J    = tau_ws.Time;
+        tau_J_data = tau_ws.Data;
+    elseif isnumeric(tau_ws) && size(tau_ws,2)>=2
+        t_tau_J    = tau_ws(:,1);
+        tau_J_data = tau_ws(:,2);
+    else
+        error('La variabile "tau_j" esiste ma non è Timeseries né [t y].');
+    end
+
+    disp('Dati recuperati dai blocchi To Workspace (base workspace).');
+
+else
+    % --- Fallback: usa il Signal Logging (logsout) con nomi di segnale 'theta' e 'tau_j'
+    warning(['Non ho trovato "theta" e/o "tau_j" nel base workspace. ', ...
+             'Attivo il logging dei segnali come fallback.']);
+
+    set_param(mdl, 'SignalLogging', 'on');
+    set_param(mdl, 'SignalLoggingName', 'logsout');
+
+    % contrassegna le linee con nome segnale (clic destro -> Log Selected Signal in GUI);
+    % qui assumo che i nomi di segnale siano 'theta' e 'tau_j'
+    simOut = sim(mdl, 'StopTime', num2str(Tf), 'SaveOutput','on');
+
+    try
+        el_theta = simOut.logsout.getElement('theta');
+        el_tau   = simOut.logsout.getElement('tau_J');
+
+        t_theta    = el_theta.Values.Time;
+        theta_data = el_theta.Values.Data;
+
+        t_tau_J    = el_tau.Values.Time;
+        tau_J_data = el_tau.Values.Data;
+
+        disp('Dati recuperati da logsout (Signal Logging).');
+    catch
+        error(['Fallback fallito: assicurati che i segnali siano nominati "theta" e "tau_j" ', ...
+               'e che il logging sia attivo (Log Selected Signals).']);
+    end
+end
+
+% --- Plot rapido
+figure('Name','Uscite Simulazione');
+subplot(2,1,1); plot(t_theta, theta_data, 'LineWidth',1.2); grid on;
+xlabel('Tempo [s]'); ylabel('\theta [rad]'); title('Posizione giunto \theta(t)');
+
+subplot(2,1,2); plot(t_tau_J, tau_J_data, 'LineWidth',1.2); grid on;
+xlabel('Tempo [s]'); ylabel('\tau_J [Nm]'); title('Coppia di giunto \tau_J(t)');
